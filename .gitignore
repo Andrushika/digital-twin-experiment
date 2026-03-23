@@ -1,0 +1,77 @@
+# =========================
+# Unity generated folders
+# =========================
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+UserSettings/
+
+# =========================
+# Visual Studio / Rider
+# =========================
+.vs/
+.idea/
+.gradle/
+
+# Auto-generated project files
+ExportedObj/
+.consulo/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+
+# =========================
+# OS generated files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Unity cache / crash files
+# =========================
+sysinfo.txt
+
+# =========================
+# Logs / upgrade files
+# =========================
+UpgradeLog.htm
+*.log
+
+# =========================
+# Addressables / AssetBundles output (optional)
+# =========================
+ServerData/
+StreamingAssets/aa.meta
+StreamingAssets/aa/
+
+# =========================
+# Ignore build artifacts
+# =========================
+*.apk
+*.aab
+*.unitypackage
+
+# =========================
+# Keep meta files!
+# =========================
+!*.meta

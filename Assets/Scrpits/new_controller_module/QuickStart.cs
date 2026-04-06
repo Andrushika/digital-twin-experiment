@@ -71,8 +71,8 @@ public class QuickStart : MonoBehaviour
         }
 
         // 設定 CSV 檔路徑
-        // CSV 應該放在 Assets/Motion Data/ 資料夾下
-        string csvPath = "Motion Data/" + csvFileName;
+        // CSV 應該放在 Assets/Motion Data/keypoints_data/ 資料夾下
+        string csvPath = "Motion Data/keypoints_data/" + csvFileName;
         dataReceiver.ConfigureFileInput(csvPath, playbackSpeed);
 
         Debug.Log($"[QuickStart] Setup complete. CSV path: {csvPath}");

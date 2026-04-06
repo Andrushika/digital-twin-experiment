@@ -509,14 +509,14 @@ public class DataReceiver : MonoBehaviour
         switch (coordinatePreset)
         {
             case CoordinatePreset.MediaPipe_World:
-                // World Landmarks: x=右, y=上, z=朝攝影機
-                // Unity:           x=右, y=上, z=遠離攝影機
-                // → X=X, Y=Y, Z=-Z
+                // World Landmarks: x+=被攝者的左邊, y+=上, z+=朝攝影機
+                // Unity:           x+=被攝者的右邊, y+=上, z+=遠離攝影機
+                // → X=-X, Y=Y, Z=-Z
                 isNorm = false;
                 center = false;
                 invertY = false;
                 normScale = 1f;
-                xFrom = AxisSource.X;
+                xFrom = AxisSource.NegX;
                 yFrom = AxisSource.Y;
                 zFrom = AxisSource.NegZ;
                 scale = Vector3.one;

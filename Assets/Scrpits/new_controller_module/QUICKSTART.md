@@ -7,7 +7,7 @@
 #### 1️⃣ 準備 CSV 檔案
 ```
 Assets/
-└─ Motion Data/
+└─ Motion Data/keypoints_data/
    └─ your_pose_data.csv  (MediaPipe 33 點格式)
 ```
 

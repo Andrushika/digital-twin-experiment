@@ -15,6 +15,7 @@ UserSettings/
 .vs/
 .idea/
 .gradle/
+.claude/
 
 # Auto-generated project files
 ExportedObj/

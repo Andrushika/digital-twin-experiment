@@ -11,13 +11,17 @@ using UnityEngine;
 /// 核心方法：
 /// ─────────────────────────────────
 /// 軀幹：World-Space Delta
-///   delta   = srcCurrentWorld * Inverse(srcRestWorld)
-///   targetW = delta * avatarRestWorld
+///   delta   = srcCurrentW * Inverse(srcRestW)
+///   targetW = delta * avRestW
 ///
-/// 四肢：Absolute Direction Mapping + Stabilized Twist
-///   1. Swing = FromToRotation(avRestBoneDir, srcDir) → 方向對齊
-///   2. Twist = 時序穩定的繞骨軸扭轉（帶連續性修正 + 低通濾波）
-///   3. targetW = twist * swing * avRestW
+/// 四肢：Parent-Inherited Swing（業界標準 FK retarget）
+///   parentDelta  = parentCurrentW * Inverse(parentRestW)
+///   inheritedDir = parentDelta * avRestBoneDir
+///   swing        = FromToRotation(inheritedDir, srcDir)  ← 最小旋轉，無 roll
+///   targetW      = swing * parentDelta * avRestW
+///
+/// Twist 完全靠層級繼承（chest→arm, hip→leg），不從 pole hint 硬算。
+/// 避免 MediaPipe 手掌/腳掌法線雜訊造成的「扭抹布」artifact。
 /// </summary>
 public class RetargetSolver : MonoBehaviour
 {
@@ -31,10 +35,6 @@ public class RetargetSolver : MonoBehaviour
     [SerializeField] private bool flipX = false;
     [SerializeField] private bool flipY = false;
     [SerializeField] private bool flipZ = false;
-
-    [Header("Twist Control")]
-    [Tooltip("是否套用 twist（骨骼自體旋轉）。MediaPipe 無 twist ground truth，建議關閉。")]
-    [SerializeField] private bool applyTwist = false;
 
     // ===== Bone cache =====
     private Transform hipBone;
@@ -64,12 +64,6 @@ public class RetargetSolver : MonoBehaviour
     // Source rest world rotations
     private Quaternion srcRestPelvisW, srcRestSpineW, srcRestChestW, srcRestNeckW, srcRestHeadW;
 
-    // Source rest limb rotations
-    private Quaternion srcRestLUpperArmW, srcRestLLowerArmW;
-    private Quaternion srcRestRUpperArmW, srcRestRLowerArmW;
-    private Quaternion srcRestLUpperLegW, srcRestLLowerLegW;
-    private Quaternion srcRestRUpperLegW, srcRestRLowerLegW;
-
     // Avatar rest world rotations
     private Quaternion avRestHipW, avRestSpineW, avRestChestW, avRestNeckW, avRestHeadW;
     private Quaternion avRestLUpperArmW, avRestLLowerArmW;
@@ -77,7 +71,7 @@ public class RetargetSolver : MonoBehaviour
     private Quaternion avRestLUpperLegW, avRestLLowerLegW;
     private Quaternion avRestRUpperLegW, avRestRLowerLegW;
 
-    // Avatar rest bone physical directions
+    // Avatar rest bone physical directions (world space)
     private Vector3 avRestDirLUpperArm, avRestDirLLowerArm;
     private Vector3 avRestDirRUpperArm, avRestDirRLowerArm;
     private Vector3 avRestDirLUpperLeg, avRestDirLLowerLeg;
@@ -168,15 +162,6 @@ public class RetargetSolver : MonoBehaviour
         srcRestHeadW   = pose.Head.Rotation;
         srcRestNeckW   = Quaternion.Slerp(srcRestChestW, srcRestHeadW, 0.5f);
 
-        srcRestLUpperArmW = pose.L_UpperArm.Rotation;
-        srcRestLLowerArmW = pose.L_LowerArm.Rotation;
-        srcRestRUpperArmW = pose.R_UpperArm.Rotation;
-        srcRestRLowerArmW = pose.R_LowerArm.Rotation;
-        srcRestLUpperLegW = pose.L_UpperLeg.Rotation;
-        srcRestLLowerLegW = pose.L_LowerLeg.Rotation;
-        srcRestRUpperLegW = pose.R_UpperLeg.Rotation;
-        srcRestRLowerLegW = pose.R_LowerLeg.Rotation;
-
         // Avatar rest rotations
         avRestHipW   = hipBone.rotation;
         avRestSpineW = spineBone != null ? spineBone.rotation : avRestHipW;
@@ -194,7 +179,7 @@ public class RetargetSolver : MonoBehaviour
         avRestRUpperLegW = r_upperLegBone != null ? r_upperLegBone.rotation : avRestHipW;
         avRestRLowerLegW = r_lowerLegBone != null ? r_lowerLegBone.rotation : avRestRUpperLegW;
 
-        // Avatar rest bone directions
+        // Avatar rest bone directions (world space)
         avRestDirLUpperArm = SafeBoneDir(l_upperArmBone, l_lowerArmBone);
         avRestDirLLowerArm = SafeBoneDir(l_lowerArmBone, l_handBone);
         avRestDirRUpperArm = SafeBoneDir(r_upperArmBone, r_lowerArmBone);
@@ -251,26 +236,43 @@ public class RetargetSolver : MonoBehaviour
 
         if (!includeLimbs) return;
 
-        // Limbs — Absolute Direction Mapping
-        SetLimbDirect(l_upperArmBone, pose.L_UpperArm, srcRestLUpperArmW,
-                      avRestDirLUpperArm, avRestLUpperArmW);
-        SetLimbDirect(l_lowerArmBone, pose.L_LowerArm, srcRestLLowerArmW,
-                      avRestDirLLowerArm, avRestLLowerArmW);
+        // Limbs — Parent-Inherited Swing
+        // 順序很重要：parent 必須先設好（torso 已完成），子骨才能讀到正確的 parent 世界旋轉
+        Quaternion chestCurrentW = chestBone != null ? chestBone.rotation : avRestChestW;
 
-        SetLimbDirect(r_upperArmBone, pose.R_UpperArm, srcRestRUpperArmW,
-                      avRestDirRUpperArm, avRestRUpperArmW);
-        SetLimbDirect(r_lowerArmBone, pose.R_LowerArm, srcRestRLowerArmW,
-                      avRestDirRLowerArm, avRestRLowerArmW);
+        SetLimbSwingInherit(l_upperArmBone, pose.L_UpperArm.Forward,
+                            chestCurrentW, avRestChestW,
+                            avRestDirLUpperArm, avRestLUpperArmW);
+        SetLimbSwingInherit(l_lowerArmBone, pose.L_LowerArm.Forward,
+                            l_upperArmBone != null ? l_upperArmBone.rotation : avRestLUpperArmW,
+                            avRestLUpperArmW,
+                            avRestDirLLowerArm, avRestLLowerArmW);
 
-        SetLimbDirect(l_upperLegBone, pose.L_UpperLeg, srcRestLUpperLegW,
-                      avRestDirLUpperLeg, avRestLUpperLegW);
-        SetLimbDirect(l_lowerLegBone, pose.L_LowerLeg, srcRestLLowerLegW,
-                      avRestDirLLowerLeg, avRestLLowerLegW);
+        SetLimbSwingInherit(r_upperArmBone, pose.R_UpperArm.Forward,
+                            chestCurrentW, avRestChestW,
+                            avRestDirRUpperArm, avRestRUpperArmW);
+        SetLimbSwingInherit(r_lowerArmBone, pose.R_LowerArm.Forward,
+                            r_upperArmBone != null ? r_upperArmBone.rotation : avRestRUpperArmW,
+                            avRestRUpperArmW,
+                            avRestDirRLowerArm, avRestRLowerArmW);
 
-        SetLimbDirect(r_upperLegBone, pose.R_UpperLeg, srcRestRUpperLegW,
-                      avRestDirRUpperLeg, avRestRUpperLegW);
-        SetLimbDirect(r_lowerLegBone, pose.R_LowerLeg, srcRestRLowerLegW,
-                      avRestDirRLowerLeg, avRestRLowerLegW);
+        Quaternion hipCurrentW = hipBone.rotation;
+
+        SetLimbSwingInherit(l_upperLegBone, pose.L_UpperLeg.Forward,
+                            hipCurrentW, avRestHipW,
+                            avRestDirLUpperLeg, avRestLUpperLegW);
+        SetLimbSwingInherit(l_lowerLegBone, pose.L_LowerLeg.Forward,
+                            l_upperLegBone != null ? l_upperLegBone.rotation : avRestLUpperLegW,
+                            avRestLUpperLegW,
+                            avRestDirLLowerLeg, avRestLLowerLegW);
+
+        SetLimbSwingInherit(r_upperLegBone, pose.R_UpperLeg.Forward,
+                            hipCurrentW, avRestHipW,
+                            avRestDirRUpperLeg, avRestRUpperLegW);
+        SetLimbSwingInherit(r_lowerLegBone, pose.R_LowerLeg.Forward,
+                            r_upperLegBone != null ? r_upperLegBone.rotation : avRestRUpperLegW,
+                            avRestRUpperLegW,
+                            avRestDirRLowerLeg, avRestRLowerLegW);
     }
 
     // ===== Torso =====
@@ -292,46 +294,38 @@ public class RetargetSolver : MonoBehaviour
         bone.localRotation = Quaternion.Inverse(bone.parent.rotation) * targetWorld;
     }
 
-    // ===== Limbs: Absolute Direction Mapping =====
+    // ===== Limbs: Parent-Inherited Swing =====
 
     /// <summary>
-    /// 絕對方向映射：
+    /// 四肢 FK retarget（業界標準）：
     ///
-    /// 1. Swing = FromToRotation(avRestBoneDir, srcDir) → 骨骼方向對齊
-    /// 2. Twist = 預設關閉（applyTwist=false），因為 MediaPipe 只提供關節位置，
-    ///    不提供骨骼自體旋轉。任何 twist 推測都是幾何噪音，會導致麻花捲扭轉。
-    ///    如果有其他 twist 來源（如 IMU），可開啟 applyTwist。
+    /// 1. parentDelta = parentCurrentW * Inverse(parentRestW)
+    ///    → parent 從 rest 到現在轉了多少
+    /// 2. inheritedDir = parentDelta * avRestBoneDir
+    ///    → 若子骨剛性跟隨 parent，骨骼方向會在哪
+    /// 3. swing = FromToRotation(inheritedDir, srcDir)
+    ///    → 最小旋轉把骨骼校正到 MediaPipe 量測方向（無多餘 roll）
+    /// 4. targetW = swing * parentDelta * avRestW
+    ///
+    /// 為什麼這樣自然：
+    /// - Twist 不是硬算出來的，而是沿著骨骼層級自然繼承下來
+    ///   (pelvis → upperLeg → lowerLeg → foot, chest → upperArm → lowerArm → hand)
+    /// - 身體轉向時，整條手臂/腿會跟著 parent 一起轉 → 腳尖/手指會跟著面向
+    /// - FromToRotation 是最小旋轉，不帶任何 roll，關節不會出現「扭抹布」
     /// </summary>
-    private void SetLimbDirect(Transform bone,
-                               PoseInterpreter.BodyPartFrame srcFrame, Quaternion srcRestW,
-                               Vector3 avRestBoneDir, Quaternion avRestBoneW)
+    private void SetLimbSwingInherit(Transform bone, Vector3 srcDir,
+                                      Quaternion parentCurrentW, Quaternion parentRestW,
+                                      Vector3 avRestBoneDir, Quaternion avRestBoneW)
     {
         if (bone == null) return;
 
-        // 1. Swing：把 Avatar rest 骨骼方向對齊到來源方向
-        Vector3 srcDir = srcFrame.Forward;
-        Quaternion swing = Quaternion.FromToRotation(avRestBoneDir, srcDir);
-        Quaternion swungW = swing * avRestBoneW;
+        Quaternion parentDelta = parentCurrentW * Quaternion.Inverse(parentRestW);
+        Vector3 inheritedDir = parentDelta * avRestBoneDir;
 
-        if (applyTwist)
-        {
-            // 可選：從來源 Quaternion 提取 twist（需要可靠的 twist 來源）
-            Quaternion srcCurrentW = srcFrame.Rotation;
-            Vector3 srcRestUp = srcRestW * Vector3.up;
-            Vector3 srcCurrentUp = srcCurrentW * Vector3.up;
+        Quaternion swing = Quaternion.FromToRotation(inheritedDir, srcDir);
+        Quaternion targetW = swing * parentDelta * avRestBoneW;
 
-            Vector3 projRestUp = Vector3.ProjectOnPlane(srcRestUp, srcDir);
-            Vector3 projCurrentUp = Vector3.ProjectOnPlane(srcCurrentUp, srcDir);
-
-            if (projRestUp.sqrMagnitude > 0.05f && projCurrentUp.sqrMagnitude > 0.05f)
-            {
-                float twistAngle = Vector3.SignedAngle(projRestUp.normalized, projCurrentUp.normalized, srcDir);
-                Quaternion twist = Quaternion.AngleAxis(twistAngle, srcDir);
-                swungW = twist * swungW;
-            }
-        }
-
-        bone.localRotation = Quaternion.Inverse(bone.parent.rotation) * swungW;
+        bone.localRotation = Quaternion.Inverse(bone.parent.rotation) * targetW;
     }
 
     // ===== Helpers =====

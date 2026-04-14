@@ -114,6 +114,8 @@ public class PoseValidator
         Dictionary<string, List<float>> deltaErrors = new Dictionary<string, List<float>>();
         Dictionary<string, List<float>> absErrors = new Dictionary<string, List<float>>();
         Dictionary<string, List<float>> twistJumps = new Dictionary<string, List<float>>();
+        List<float> kneeFootFacingErrors = new List<float>(); // 膝蓋/腳尖朝向 vs 身體朝向一致性
+        List<float> handFacingErrors = new List<float>();     // 手掌朝向一致性
         foreach (var bc in BONE_CHECKS)
         {
             deltaErrors[bc.name] = new List<float>();
@@ -257,6 +259,7 @@ public class PoseValidator
             }
 
             // Torso facing direction check: source vs avatar forward
+            Vector3 srcBodyFwd = Vector3.forward;
             {
                 Vector3 srcHipCenter = (poseData.GetJoint(HumanPoseData.JointType.L_Hip)
                                       + poseData.GetJoint(HumanPoseData.JointType.R_Hip)) * 0.5f;
@@ -265,14 +268,112 @@ public class PoseValidator
                 Vector3 srcUp = (srcShoulderCenter - srcHipCenter).normalized;
                 Vector3 srcRight = (poseData.GetJoint(HumanPoseData.JointType.R_Hip)
                                   - poseData.GetJoint(HumanPoseData.JointType.L_Hip)).normalized;
-                Vector3 srcFwd = Vector3.Cross(srcRight, srcUp).normalized;
+                srcBodyFwd = Vector3.Cross(srcRight, srcUp).normalized;
+
+                // nose hint
+                Vector3 noseHint = Vector3.ProjectOnPlane(
+                    poseData.GetJoint(HumanPoseData.JointType.Nose) - srcHipCenter, srcUp);
+                if (noseHint.sqrMagnitude > 1e-6f && Vector3.Dot(srcBodyFwd, noseHint) < 0f)
+                    srcBodyFwd = -srcBodyFwd;
 
                 if (boneMap.ContainsKey(HumanBodyBones.Hips))
                 {
                     Vector3 avFwd = boneMap[HumanBodyBones.Hips].forward;
-                    float torsoAngle = Vector3.Angle(srcFwd, avFwd);
+                    float torsoAngle = Vector3.Angle(srcBodyFwd, avFwd);
                     fr.Append($", \"torso_fwd_err\": {torsoAngle:F1}");
                 }
+            }
+
+            // Knee/foot facing consistency: 膝蓋前向是否與身體轉向一致
+            // 這是 twist 修正的核心驗證 — 人轉向左邊時，膝蓋也應該朝左
+            {
+                float worstKneeErr = 0f;
+
+                // Source: 用 heel→foot_index 判斷腳尖朝向（在水平面的投影）
+                // Avatar: 用 foot bone 的 forward
+                HumanPoseData.JointType[] heels = { HumanPoseData.JointType.L_Heel, HumanPoseData.JointType.R_Heel };
+                HumanPoseData.JointType[] footIdxs = { HumanPoseData.JointType.L_Foot_Index, HumanPoseData.JointType.R_Foot_Index };
+                HumanBodyBones[] footBones = { HumanBodyBones.LeftFoot, HumanBodyBones.RightFoot };
+                string[] sideNames = { "L", "R" };
+
+                for (int s = 0; s < 2; s++)
+                {
+                    Vector3 heel = poseData.GetJoint(heels[s]);
+                    Vector3 footIdx = poseData.GetJoint(footIdxs[s]);
+                    Vector3 srcFootFwd = (footIdx - heel);
+                    if (srcFootFwd.sqrMagnitude < 1e-6f) continue;
+
+                    // 只看水平面上的朝向差異（Y=0 投影）
+                    Vector3 srcFootFlat = new Vector3(srcFootFwd.x, 0f, srcFootFwd.z).normalized;
+                    Vector3 srcBodyFlat = new Vector3(srcBodyFwd.x, 0f, srcBodyFwd.z).normalized;
+
+                    if (srcFootFlat.sqrMagnitude < 1e-6f || srcBodyFlat.sqrMagnitude < 1e-6f) continue;
+
+                    // 來源的腳尖 vs 身體朝向的夾角
+                    float srcAngle = Vector3.SignedAngle(srcBodyFlat, srcFootFlat, Vector3.up);
+
+                    // Avatar 的腳部 forward vs hip forward
+                    if (boneMap.ContainsKey(footBones[s]) && boneMap.ContainsKey(HumanBodyBones.Hips))
+                    {
+                        Vector3 avFootFwd = new Vector3(boneMap[footBones[s]].forward.x, 0f, boneMap[footBones[s]].forward.z).normalized;
+                        Vector3 avHipFwd = new Vector3(boneMap[HumanBodyBones.Hips].forward.x, 0f, boneMap[HumanBodyBones.Hips].forward.z).normalized;
+
+                        if (avFootFwd.sqrMagnitude > 1e-6f && avHipFwd.sqrMagnitude > 1e-6f)
+                        {
+                            float avAngle = Vector3.SignedAngle(avHipFwd, avFootFwd, Vector3.up);
+                            float facingErr = Mathf.Abs(srcAngle - avAngle);
+                            if (facingErr > 180f) facingErr = 360f - facingErr;
+
+                            if (facingErr > worstKneeErr) worstKneeErr = facingErr;
+                            fr.Append($", \"{sideNames[s]}_foot_facing_err\": {facingErr:F1}");
+                        }
+                    }
+                }
+                kneeFootFacingErrors.Add(worstKneeErr);
+            }
+
+            // Hand/palm facing consistency: 手掌法線（source vs avatar）
+            // 用來診斷手臂 twist 是否正確、以及 input data 是否合理
+            {
+                float worstHandErr = 0f;
+
+                HumanPoseData.JointType[] wrists = { HumanPoseData.JointType.L_Wrist, HumanPoseData.JointType.R_Wrist };
+                HumanPoseData.JointType[] indices = { HumanPoseData.JointType.L_Index, HumanPoseData.JointType.R_Index };
+                HumanPoseData.JointType[] pinkies = { HumanPoseData.JointType.L_Pinky, HumanPoseData.JointType.R_Pinky };
+                HumanBodyBones[] handBones = { HumanBodyBones.LeftHand, HumanBodyBones.RightHand };
+                string[] handSideNames = { "L", "R" };
+
+                for (int s = 0; s < 2; s++)
+                {
+                    Vector3 wrist = poseData.GetJoint(wrists[s]);
+                    Vector3 idx = poseData.GetJoint(indices[s]);
+                    Vector3 pinky = poseData.GetJoint(pinkies[s]);
+
+                    Vector3 toIndex = idx - wrist;
+                    Vector3 toPinky = pinky - wrist;
+                    Vector3 srcPalmNormal = Vector3.Cross(toIndex, toPinky);
+                    if (srcPalmNormal.sqrMagnitude < 1e-6f) continue;
+                    srcPalmNormal = srcPalmNormal.normalized;
+
+                    // 來源手掌法線 vs 身體上方的夾角（量測手掌朝向）
+                    float srcAngleToUp = Vector3.Angle(srcPalmNormal, Vector3.up);
+
+                    // Avatar 的手掌朝向：hand bone 的 up 方向 vs 世界 up 的夾角
+                    if (boneMap.ContainsKey(handBones[s]))
+                    {
+                        Vector3 avHandUp = boneMap[handBones[s]].up;
+                        float avAngleToUp = Vector3.Angle(avHandUp, Vector3.up);
+
+                        float handErr = Mathf.Abs(srcAngleToUp - avAngleToUp);
+                        if (handErr > 180f) handErr = 360f - handErr;
+
+                        if (handErr > worstHandErr) worstHandErr = handErr;
+                        fr.Append($", \"{handSideNames[s]}_hand_facing_err\": {handErr:F1}");
+                        fr.Append($", \"{handSideNames[s]}_src_palm_angle\": {srcAngleToUp:F1}");
+                        fr.Append($", \"{handSideNames[s]}_av_hand_angle\": {avAngleToUp:F1}");
+                    }
+                }
+                handFacingErrors.Add(worstHandErr);
             }
 
             fr.Append("}");
@@ -347,12 +448,34 @@ public class PoseValidator
         report.AppendLine("  },");
         report.AppendLine($"  \"total_twist_jumps\": {totalTwistJumps},");
 
+        // Knee/foot facing consistency summary
+        float facingMean = 0f, facingMax = 0f;
+        if (kneeFootFacingErrors.Count > 0)
+        {
+            float facingSum = 0f;
+            foreach (float e in kneeFootFacingErrors) { facingSum += e; if (e > facingMax) facingMax = e; }
+            facingMean = facingSum / kneeFootFacingErrors.Count;
+        }
+        report.AppendLine($"  \"foot_facing_consistency\": {{\"mean\": {facingMean:F1}, \"max\": {facingMax:F1}, \"n\": {kneeFootFacingErrors.Count}}},");
+
+        // Hand facing consistency summary
+        float handMean = 0f, handMax = 0f;
+        if (handFacingErrors.Count > 0)
+        {
+            float handSum = 0f;
+            foreach (float e in handFacingErrors) { handSum += e; if (e > handMax) handMax = e; }
+            handMean = handSum / handFacingErrors.Count;
+        }
+        report.AppendLine($"  \"hand_facing_consistency\": {{\"mean\": {handMean:F1}, \"max\": {handMax:F1}, \"n\": {handFacingErrors.Count}}},");
+
         // Verdict based on delta errors (the fair metric)
         bool passed = worstDeltaMean < 15f && totalTwistJumps == 0;
         report.AppendLine($"  \"worst_delta_bone\": \"{worstDeltaBone}\",");
         report.AppendLine($"  \"worst_delta_mean_deg\": {worstDeltaMean:F1},");
         report.AppendLine($"  \"worst_abs_bone\": \"{worstAbsBone}\",");
         report.AppendLine($"  \"worst_abs_mean_deg\": {worstAbsMean:F1},");
+        report.AppendLine($"  \"foot_facing_mean_deg\": {facingMean:F1},");
+        report.AppendLine($"  \"hand_facing_mean_deg\": {handMean:F1},");
         report.AppendLine($"  \"verdict\": \"{(passed ? "PASS" : "FAIL")}\",");
         report.AppendLine($"  \"pass_threshold_delta_deg\": 15.0,");
 
@@ -366,6 +489,8 @@ public class PoseValidator
         Debug.Log($"[PoseValidator] Verdict: {(passed ? "PASS" : "FAIL")}");
         Debug.Log($"[PoseValidator] Delta metric — worst: {worstDeltaBone} mean={worstDeltaMean:F1}° (threshold 15°)");
         Debug.Log($"[PoseValidator] Abs metric  — worst: {worstAbsBone} mean={worstAbsMean:F1}° (reference only)");
+        Debug.Log($"[PoseValidator] Foot facing — mean={facingMean:F1}° max={facingMax:F1}° (twist consistency)");
+        Debug.Log($"[PoseValidator] Hand facing — mean={handMean:F1}° max={handMax:F1}° (arm twist consistency)");
         Debug.Log($"[PoseValidator] Report: {reportPath}");
     }
 

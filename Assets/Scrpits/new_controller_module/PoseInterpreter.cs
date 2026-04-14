@@ -27,6 +27,13 @@ public class PoseInterpreter
         public Vector3 Right { get; set; }     // X
         public Vector3 Up { get; set; }        // Y
 
+        /// <summary>
+        /// 是否具有來自幾何約束（非啟發式投影）的可靠 twist 資訊。
+        /// 例如：手掌平面（wrist+pinky+index）、腳底平面（ankle+heel+foot_index）、
+        /// 或三關節彎曲平面（肘/膝彎曲方向）。
+        /// </summary>
+        public bool HasReliableTwist { get; set; }
+
         public BodyPartFrame()
         {
             Position = Vector3.zero;
@@ -35,6 +42,7 @@ public class PoseInterpreter
             Forward = Vector3.forward;
             Right = Vector3.right;
             Up = Vector3.up;
+            HasReliableTwist = false;
         }
     }
 
@@ -57,6 +65,12 @@ public class PoseInterpreter
         public BodyPartFrame R_UpperLeg;    // 右大腿
         public BodyPartFrame R_LowerLeg;    // 右小腿
 
+        // 直接從 keypoints 測量的方向，用於 RetargetSolver 的 pole hint
+        public Vector3 L_FootForward;       // 左腳 heel→foot_index 方向
+        public Vector3 R_FootForward;       // 右腳 heel→foot_index 方向
+        public Vector3 L_PalmNormal;        // 左手掌法線 cross(wrist→index, wrist→pinky)
+        public Vector3 R_PalmNormal;        // 右手掌法線
+
         public InterpretedPose()
         {
             Pelvis = new BodyPartFrame();
@@ -70,6 +84,10 @@ public class PoseInterpreter
             L_LowerLeg = new BodyPartFrame();
             R_UpperLeg = new BodyPartFrame();
             R_LowerLeg = new BodyPartFrame();
+            L_FootForward = Vector3.forward;
+            R_FootForward = Vector3.forward;
+            L_PalmNormal = Vector3.up;
+            R_PalmNormal = Vector3.up;
         }
     }
 
@@ -274,6 +292,14 @@ public class PoseInterpreter
                             interpretedPose.R_LowerLeg, false,
                             rawPose.Confidence[(int)HumanPoseData.JointType.R_Knee],
                             rawPose.Confidence[(int)HumanPoseData.JointType.R_Ankle]);
+
+        // NOTE: Phase 3b twist refinement (RefineUpperLimbTwistFromBend, RefineLowerArmTwist,
+        // RefineLowerLegTwist) 已移除。幾何約束（彎曲平面、手掌法線）噪音過大，
+        // 造成 twist jump。改由 RetargetSolver 從父骨骼 delta 繼承 twist。
+
+        // ===== 計算直接測量的方向（供 RetargetSolver 當 pole hint） =====
+        ComputeFootForwardVectors(rawPose);
+        ComputePalmNormalVectors(rawPose);
     }
 
     /// <summary>
@@ -345,6 +371,239 @@ public class PoseInterpreter
         output.Up = up_axis;
         output.Rotation = EnsureQuaternionContinuity(prev.Rotation, FrameToQuaternion(right_axis, up_axis, bone_axis));
         output.Confidence = (confidenceJoint + confidenceDistal) * 0.5f;
+    }
+
+    // ===== 直接測量方向（供 RetargetSolver pole hint） =====
+
+    /// <summary>
+    /// 從 heel→foot_index 計算腳朝前方向。
+    /// 這是直接測量值，不經過投影或 cross product，
+    /// 所以在蹲下過渡時不會退化或翻轉。
+    /// </summary>
+    private void ComputeFootForwardVectors(HumanPoseData rawPose)
+    {
+        Vector3 l_heel = rawPose.GetJoint(HumanPoseData.JointType.L_Heel);
+        Vector3 l_footIdx = rawPose.GetJoint(HumanPoseData.JointType.L_Foot_Index);
+        Vector3 l_fwd = l_footIdx - l_heel;
+        interpretedPose.L_FootForward = l_fwd.sqrMagnitude > Epsilon
+            ? l_fwd.normalized
+            : interpretedPose.Pelvis.Forward;
+
+        Vector3 r_heel = rawPose.GetJoint(HumanPoseData.JointType.R_Heel);
+        Vector3 r_footIdx = rawPose.GetJoint(HumanPoseData.JointType.R_Foot_Index);
+        Vector3 r_fwd = r_footIdx - r_heel;
+        interpretedPose.R_FootForward = r_fwd.sqrMagnitude > Epsilon
+            ? r_fwd.normalized
+            : interpretedPose.Pelvis.Forward;
+    }
+
+    /// <summary>
+    /// 從 wrist/index/pinky 三點計算手掌法線。
+    /// 手掌法線 = cross(wrist→index, wrist→pinky)。
+    /// 代表手掌面朝的方向（前臂的 pronation/supination）。
+    /// </summary>
+    private void ComputePalmNormalVectors(HumanPoseData rawPose)
+    {
+        // 左手
+        Vector3 l_wrist = rawPose.GetJoint(HumanPoseData.JointType.L_Wrist);
+        Vector3 l_index = rawPose.GetJoint(HumanPoseData.JointType.L_Index);
+        Vector3 l_pinky = rawPose.GetJoint(HumanPoseData.JointType.L_Pinky);
+        Vector3 l_toIndex = (l_index - l_wrist);
+        Vector3 l_toPinky = (l_pinky - l_wrist);
+        Vector3 l_normal = Vector3.Cross(l_toIndex, l_toPinky);
+        interpretedPose.L_PalmNormal = l_normal.sqrMagnitude > Epsilon
+            ? l_normal.normalized
+            : interpretedPose.Chest.Up;
+
+        // 右手
+        Vector3 r_wrist = rawPose.GetJoint(HumanPoseData.JointType.R_Wrist);
+        Vector3 r_index = rawPose.GetJoint(HumanPoseData.JointType.R_Index);
+        Vector3 r_pinky = rawPose.GetJoint(HumanPoseData.JointType.R_Pinky);
+        Vector3 r_toIndex = (r_index - r_wrist);
+        Vector3 r_toPinky = (r_pinky - r_wrist);
+        Vector3 r_normal = Vector3.Cross(r_toIndex, r_toPinky);
+        interpretedPose.R_PalmNormal = r_normal.sqrMagnitude > Epsilon
+            ? r_normal.normalized
+            : interpretedPose.Chest.Up;
+    }
+
+    // ===== Twist Refinement Methods (使用額外 keypoints) =====
+
+    /// <summary>
+    /// 上肢/上腿 twist 精煉：利用三關節彎曲平面。
+    ///
+    /// 原理：shoulder→elbow→wrist 三點定義一個彎曲平面，
+    /// 該平面的法線就是肘/膝的指向方向（即 twist 軸的 up 分量）。
+    ///
+    /// 安全機制：
+    /// - 彎曲角 < 10° → 不使用（接近伸直時 cross product 噪音太大）
+    /// - 彎曲角 10°~25° → 與原始 frame 混合過渡
+    /// - 彎曲角 > 25° → 完全使用彎曲平面 twist
+    /// - 與前幀 twist 差異 > 90° → 翻轉法線方向（避免突然跳轉）
+    /// </summary>
+    private const float BEND_MIN_DEG = 10f;
+    private const float BEND_FULL_DEG = 25f;
+
+    private void RefineUpperLimbTwistFromBend(Vector3 root, Vector3 joint, Vector3 distal,
+                                               BodyPartFrame output, BodyPartFrame parentFrame, bool isLeft)
+    {
+        Vector3 boneAxis = output.Forward;
+        Vector3 upperToJoint = SafeNormalize(joint - root, boneAxis);
+        Vector3 jointToDistal = SafeNormalize(distal - joint, boneAxis);
+
+        // 計算彎曲角度
+        float bendAngle = Vector3.Angle(upperToJoint, jointToDistal);
+        if (bendAngle < BEND_MIN_DEG)
+            return; // 太直，彎曲平面不可靠
+
+        Vector3 bendNormal = Vector3.Cross(upperToJoint, jointToDistal);
+        if (bendNormal.sqrMagnitude < Epsilon)
+            return;
+
+        bendNormal = bendNormal.normalized;
+
+        // 時序連續性：若 bendNormal 與前幀 right 夾角 > 90°，翻轉
+        if (Vector3.Dot(bendNormal, output.Right) < 0f)
+            bendNormal = -bendNormal;
+
+        Vector3 right = bendNormal;
+        Vector3 up = SafeNormalize(Vector3.Cross(boneAxis, right), output.Up);
+        right = SafeNormalize(Vector3.Cross(up, boneAxis), right);
+
+        ApplyLeftRightMirrorRule(parentFrame, isLeft, ref right, ref up);
+
+        // 平滑混合：彎曲角 10°~25° 之間線性混合
+        float blend = Mathf.Clamp01((bendAngle - BEND_MIN_DEG) / (BEND_FULL_DEG - BEND_MIN_DEG));
+
+        // 與原始 frame（無 twist 精煉）的 right/up 混合
+        right = Vector3.Slerp(output.Right, right, blend);
+        up = Vector3.Slerp(output.Up, up, blend);
+
+        // 重新正交化
+        right = SafeNormalize(Vector3.ProjectOnPlane(right, boneAxis), output.Right);
+        up = SafeNormalize(Vector3.Cross(boneAxis, right), output.Up);
+
+        BodyPartFrame prev = CloneFrame(output);
+        output.Right = right;
+        output.Up = up;
+        output.Rotation = EnsureQuaternionContinuity(prev.Rotation, FrameToQuaternion(right, up, boneAxis));
+        output.HasReliableTwist = (blend > 0.5f);
+    }
+
+    /// <summary>
+    /// 前臂 twist 精煉：利用手掌平面（wrist + pinky + index）。
+    ///
+    /// 原理：wrist、pinky、index 三點定義手掌平面，
+    /// 該平面的法線代表手掌朝向（前臂的 pronation/supination）。
+    /// </summary>
+    private void RefineLowerArmTwist(HumanPoseData rawPose, BodyPartFrame output, bool isLeft)
+    {
+        HumanPoseData.JointType wristType = isLeft ? HumanPoseData.JointType.L_Wrist : HumanPoseData.JointType.R_Wrist;
+        HumanPoseData.JointType pinkyType = isLeft ? HumanPoseData.JointType.L_Pinky : HumanPoseData.JointType.R_Pinky;
+        HumanPoseData.JointType indexType = isLeft ? HumanPoseData.JointType.L_Index : HumanPoseData.JointType.R_Index;
+
+        Vector3 wrist = rawPose.GetJoint(wristType);
+        Vector3 pinky = rawPose.GetJoint(pinkyType);
+        Vector3 index = rawPose.GetJoint(indexType);
+
+        // 手掌內兩個向量
+        Vector3 wristToPinky = pinky - wrist;
+        Vector3 wristToIndex = index - wrist;
+
+        if (wristToPinky.sqrMagnitude < Epsilon || wristToIndex.sqrMagnitude < Epsilon)
+            return;
+
+        // 手掌法線 = cross(wrist→index, wrist→pinky)
+        // 對左手：法線朝手掌正面（掌心方向）
+        // 對右手：法線朝手背方向，需要反轉
+        Vector3 palmNormal = Vector3.Cross(wristToIndex.normalized, wristToPinky.normalized);
+        if (palmNormal.sqrMagnitude < Epsilon)
+            return;
+
+        palmNormal = palmNormal.normalized;
+
+        // 時序連續性：若 palmNormal 與前幀 up 夾角 > 90°，翻轉
+        if (Vector3.Dot(palmNormal, output.Up) < 0f)
+            palmNormal = -palmNormal;
+
+        Vector3 boneAxis = output.Forward;
+
+        // palmNormal 投影到骨軸的垂直平面上，作為 up 方向
+        Vector3 up = Vector3.ProjectOnPlane(palmNormal, boneAxis);
+        if (up.sqrMagnitude < Epsilon)
+            return;
+
+        up = up.normalized;
+        Vector3 right = SafeNormalize(Vector3.Cross(up, boneAxis), output.Right);
+        up = SafeNormalize(Vector3.Cross(boneAxis, right), up);
+
+        BodyPartFrame prev = CloneFrame(output);
+        output.Right = right;
+        output.Up = up;
+        output.Rotation = EnsureQuaternionContinuity(prev.Rotation, FrameToQuaternion(right, up, boneAxis));
+        output.HasReliableTwist = true;
+    }
+
+    /// <summary>
+    /// 小腿 twist 精煉：利用腳部方向（ankle + heel + foot_index）。
+    ///
+    /// 原理：ankle、heel、foot_index 三點定義腳底平面，
+    /// 該平面的法線代表腳底朝向（脛骨的內/外旋）。
+    /// foot_index（腳尖）的方向也代表腳趾朝向。
+    /// </summary>
+    private void RefineLowerLegTwist(HumanPoseData rawPose, BodyPartFrame output, bool isLeft)
+    {
+        HumanPoseData.JointType ankleType = isLeft ? HumanPoseData.JointType.L_Ankle : HumanPoseData.JointType.R_Ankle;
+        HumanPoseData.JointType heelType = isLeft ? HumanPoseData.JointType.L_Heel : HumanPoseData.JointType.R_Heel;
+        HumanPoseData.JointType footIdxType = isLeft ? HumanPoseData.JointType.L_Foot_Index : HumanPoseData.JointType.R_Foot_Index;
+
+        Vector3 ankle = rawPose.GetJoint(ankleType);
+        Vector3 heel = rawPose.GetJoint(heelType);
+        Vector3 footIdx = rawPose.GetJoint(footIdxType);
+
+        // 腳的前向：heel → foot_index
+        Vector3 footForward = footIdx - heel;
+        if (footForward.sqrMagnitude < Epsilon)
+            return;
+
+        footForward = footForward.normalized;
+
+        Vector3 boneAxis = output.Forward; // knee→ankle direction
+
+        // 腳前向投影到骨軸的垂直平面上
+        // 這代表「腳尖朝向」在脛骨截面上的分量 → 脛骨的 twist
+        Vector3 footFwdProj = Vector3.ProjectOnPlane(footForward, boneAxis);
+        if (footFwdProj.sqrMagnitude < Epsilon)
+            return;
+
+        // 腳前向（投影後）作為 frame 的 forward 參考
+        // 但我們需要的是垂直於骨軸的 up/right
+        // 腳底法線 = cross(heel→foot_index, heel→ankle) → 腳底朝上
+        Vector3 heelToAnkle = ankle - heel;
+        Vector3 footUp = Vector3.Cross(footForward, heelToAnkle.normalized);
+        if (footUp.sqrMagnitude < Epsilon)
+            return;
+
+        footUp = footUp.normalized;
+
+        // 時序連續性：若 footUp 與前幀 up 夾角 > 90°，翻轉
+        if (Vector3.Dot(footUp, output.Up) < 0f)
+            footUp = -footUp;
+
+        // 投影到骨軸垂直平面
+        Vector3 up = Vector3.ProjectOnPlane(footUp, boneAxis);
+        if (up.sqrMagnitude < Epsilon)
+            return;
+
+        up = up.normalized;
+        Vector3 right = SafeNormalize(Vector3.Cross(up, boneAxis), output.Right);
+        up = SafeNormalize(Vector3.Cross(boneAxis, right), up);
+
+        BodyPartFrame prev = CloneFrame(output);
+        output.Right = right;
+        output.Up = up;
+        output.Rotation = EnsureQuaternionContinuity(prev.Rotation, FrameToQuaternion(right, up, boneAxis));
+        output.HasReliableTwist = true;
     }
 
     /// <summary>
@@ -441,7 +700,8 @@ public class PoseInterpreter
             Confidence = source.Confidence,
             Forward = source.Forward,
             Right = source.Right,
-            Up = source.Up
+            Up = source.Up,
+            HasReliableTwist = source.HasReliableTwist
         };
     }
 }

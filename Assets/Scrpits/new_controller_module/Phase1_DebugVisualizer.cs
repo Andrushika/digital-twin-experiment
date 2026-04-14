@@ -174,5 +174,36 @@ public class Phase1_DebugVisualizer : MonoBehaviour
         Vector3 r_ankle = pose.GetJoint(HumanPoseData.JointType.R_Ankle);
         Gizmos.DrawLine(r_hip, r_knee);
         Gizmos.DrawLine(r_knee, r_ankle);
+
+        // ===== 額外 keypoints：手指、腳跟、腳趾 =====
+        Gizmos.color = new Color(1f, 0.6f, 0f); // 橘色
+
+        // 左手：wrist → pinky, wrist → index
+        Vector3 l_pinky = pose.GetJoint(HumanPoseData.JointType.L_Pinky);
+        Vector3 l_index = pose.GetJoint(HumanPoseData.JointType.L_Index);
+        Gizmos.DrawLine(l_wrist, l_pinky);
+        Gizmos.DrawLine(l_wrist, l_index);
+        Gizmos.DrawLine(l_pinky, l_index); // 手掌平面
+
+        // 右手：wrist → pinky, wrist → index
+        Vector3 r_pinky = pose.GetJoint(HumanPoseData.JointType.R_Pinky);
+        Vector3 r_index = pose.GetJoint(HumanPoseData.JointType.R_Index);
+        Gizmos.DrawLine(r_wrist, r_pinky);
+        Gizmos.DrawLine(r_wrist, r_index);
+        Gizmos.DrawLine(r_pinky, r_index);
+
+        // 左腳：ankle → heel → foot_index → ankle
+        Vector3 l_heel = pose.GetJoint(HumanPoseData.JointType.L_Heel);
+        Vector3 l_foot_idx = pose.GetJoint(HumanPoseData.JointType.L_Foot_Index);
+        Gizmos.DrawLine(l_ankle, l_heel);
+        Gizmos.DrawLine(l_heel, l_foot_idx);
+        Gizmos.DrawLine(l_foot_idx, l_ankle);
+
+        // 右腳：ankle → heel → foot_index → ankle
+        Vector3 r_heel = pose.GetJoint(HumanPoseData.JointType.R_Heel);
+        Vector3 r_foot_idx = pose.GetJoint(HumanPoseData.JointType.R_Foot_Index);
+        Gizmos.DrawLine(r_ankle, r_heel);
+        Gizmos.DrawLine(r_heel, r_foot_idx);
+        Gizmos.DrawLine(r_foot_idx, r_ankle);
     }
 }

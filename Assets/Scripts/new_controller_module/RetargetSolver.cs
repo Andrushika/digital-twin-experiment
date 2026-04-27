@@ -14,14 +14,16 @@ using UnityEngine;
 ///   delta   = srcCurrentW * Inverse(srcRestW)
 ///   targetW = delta * avRestW
 ///
-/// 四肢：Parent-Inherited Swing（業界標準 FK retarget）
+/// 四肢：Parent-Inherited Swing + Optional Twist
 ///   parentDelta  = parentCurrentW * Inverse(parentRestW)
 ///   inheritedDir = parentDelta * avRestBoneDir
 ///   swing        = FromToRotation(inheritedDir, srcDir)  ← 最小旋轉，無 roll
-///   targetW      = swing * parentDelta * avRestW
+///   twist        = AngleAxis(TwistSolver 算的角度, srcDir)
+///   targetW      = twist * swing * parentDelta * avRestW
 ///
-/// Twist 完全靠層級繼承（chest→arm, hip→leg），不從 pole hint 硬算。
-/// 避免 MediaPipe 手掌/腳掌法線雜訊造成的「扭抹布」artifact。
+/// enableLimbTwist=false 時純 swing（最穩，但翻手掌/轉腳尖看不出）。
+/// =true 時用 PalmNormal/FootPlaneNormal 反推 twist，受 MediaPipe 雜訊影響大，
+/// 退化檢查會 hold 上幀避免跳變。
 /// </summary>
 public class RetargetSolver : MonoBehaviour
 {
@@ -35,6 +37,11 @@ public class RetargetSolver : MonoBehaviour
     [SerializeField] private bool flipX = false;
     [SerializeField] private bool flipY = false;
     [SerializeField] private bool flipZ = false;
+
+    [Header("Limb Twist (palm/foot-plane reference)")]
+    [Tooltip("關掉就是純 parent-inherited swing（不算 twist）；開啟才會用 PalmNormal/FootPlaneNormal 反推 twist")]
+    [SerializeField] private bool enableLimbTwist = true;
+    [SerializeField] private TwistSolver.Config twistConfig = new TwistSolver.Config();
 
     // ===== Bone cache =====
     private Transform hipBone;
@@ -84,6 +91,9 @@ public class RetargetSolver : MonoBehaviour
     // ===== Pending pose =====
     private PoseInterpreter.InterpretedPose pendingPose;
     private bool pendingIncludeLimbs;
+
+    // ===== Twist =====
+    private TwistSolver twistSolver;
 
     private void Start()
     {
@@ -207,8 +217,19 @@ public class RetargetSolver : MonoBehaviour
             autoComputedScale = 1f;
         }
 
+        // Twist solver 用同一幀建立 reference
+        if (enableLimbTwist)
+        {
+            if (twistSolver == null)
+                twistSolver = new TwistSolver(twistConfig);
+            else
+                twistSolver.Reset();
+            twistSolver.Calibrate(pose);
+        }
+
         calibrated = true;
-        Debug.Log($"[RetargetSolver] Calibrated (scale={scaleFactor * autoComputedScale:F3})");
+        Debug.Log($"[RetargetSolver] Calibrated (scale={scaleFactor * autoComputedScale:F3}, " +
+                  $"limbTwist={(enableLimbTwist ? "ON" : "OFF")})");
     }
 
     // ===== 套用姿態 =====
@@ -236,43 +257,47 @@ public class RetargetSolver : MonoBehaviour
 
         if (!includeLimbs) return;
 
-        // Limbs — Parent-Inherited Swing
+        // Limbs — Parent-Inherited Swing (+ optional twist)
         // 順序很重要：parent 必須先設好（torso 已完成），子骨才能讀到正確的 parent 世界旋轉
         Quaternion chestCurrentW = chestBone != null ? chestBone.rotation : avRestChestW;
 
+        TwistSolver.LimbTwists tw = default;
+        if (enableLimbTwist && twistSolver != null && twistSolver.IsCalibrated)
+            tw = twistSolver.Compute(pose, Time.deltaTime);
+
         SetLimbSwingInherit(l_upperArmBone, pose.L_UpperArm.Forward,
                             chestCurrentW, avRestChestW,
-                            avRestDirLUpperArm, avRestLUpperArmW);
+                            avRestDirLUpperArm, avRestLUpperArmW, tw.L_UpperArm);
         SetLimbSwingInherit(l_lowerArmBone, pose.L_LowerArm.Forward,
                             l_upperArmBone != null ? l_upperArmBone.rotation : avRestLUpperArmW,
                             avRestLUpperArmW,
-                            avRestDirLLowerArm, avRestLLowerArmW);
+                            avRestDirLLowerArm, avRestLLowerArmW, tw.L_LowerArm);
 
         SetLimbSwingInherit(r_upperArmBone, pose.R_UpperArm.Forward,
                             chestCurrentW, avRestChestW,
-                            avRestDirRUpperArm, avRestRUpperArmW);
+                            avRestDirRUpperArm, avRestRUpperArmW, tw.R_UpperArm);
         SetLimbSwingInherit(r_lowerArmBone, pose.R_LowerArm.Forward,
                             r_upperArmBone != null ? r_upperArmBone.rotation : avRestRUpperArmW,
                             avRestRUpperArmW,
-                            avRestDirRLowerArm, avRestRLowerArmW);
+                            avRestDirRLowerArm, avRestRLowerArmW, tw.R_LowerArm);
 
         Quaternion hipCurrentW = hipBone.rotation;
 
         SetLimbSwingInherit(l_upperLegBone, pose.L_UpperLeg.Forward,
                             hipCurrentW, avRestHipW,
-                            avRestDirLUpperLeg, avRestLUpperLegW);
+                            avRestDirLUpperLeg, avRestLUpperLegW, tw.L_UpperLeg);
         SetLimbSwingInherit(l_lowerLegBone, pose.L_LowerLeg.Forward,
                             l_upperLegBone != null ? l_upperLegBone.rotation : avRestLUpperLegW,
                             avRestLUpperLegW,
-                            avRestDirLLowerLeg, avRestLLowerLegW);
+                            avRestDirLLowerLeg, avRestLLowerLegW, tw.L_LowerLeg);
 
         SetLimbSwingInherit(r_upperLegBone, pose.R_UpperLeg.Forward,
                             hipCurrentW, avRestHipW,
-                            avRestDirRUpperLeg, avRestRUpperLegW);
+                            avRestDirRUpperLeg, avRestRUpperLegW, tw.R_UpperLeg);
         SetLimbSwingInherit(r_lowerLegBone, pose.R_LowerLeg.Forward,
                             r_upperLegBone != null ? r_upperLegBone.rotation : avRestRUpperLegW,
                             avRestRUpperLegW,
-                            avRestDirRLowerLeg, avRestRLowerLegW);
+                            avRestDirRLowerLeg, avRestRLowerLegW, tw.R_LowerLeg);
     }
 
     // ===== Torso =====
@@ -315,7 +340,8 @@ public class RetargetSolver : MonoBehaviour
     /// </summary>
     private void SetLimbSwingInherit(Transform bone, Vector3 srcDir,
                                       Quaternion parentCurrentW, Quaternion parentRestW,
-                                      Vector3 avRestBoneDir, Quaternion avRestBoneW)
+                                      Vector3 avRestBoneDir, Quaternion avRestBoneW,
+                                      float twistAngleDeg)
     {
         if (bone == null) return;
 
@@ -323,7 +349,14 @@ public class RetargetSolver : MonoBehaviour
         Vector3 inheritedDir = parentDelta * avRestBoneDir;
 
         Quaternion swing = Quaternion.FromToRotation(inheritedDir, srcDir);
-        Quaternion targetW = swing * parentDelta * avRestBoneW;
+
+        // twist 沿 bone 當前世界軸（= srcDir，swing 已對齊到此）旋轉，
+        // 在世界空間從左邊乘 → 對 bone 軸方向不變，只繞軸轉
+        Quaternion twistW = Mathf.Abs(twistAngleDeg) > 1e-4f
+            ? Quaternion.AngleAxis(twistAngleDeg, srcDir.normalized)
+            : Quaternion.identity;
+
+        Quaternion targetW = twistW * swing * parentDelta * avRestBoneW;
 
         bone.localRotation = Quaternion.Inverse(bone.parent.rotation) * targetW;
     }
@@ -353,6 +386,38 @@ public class RetargetSolver : MonoBehaviour
         pendingPose = null;
         CacheBones();
     }
+
+    public void CalibrateFromPose(PoseInterpreter.InterpretedPose pose)
+    {
+        if (pose == null) return;
+        if (hipBone == null) CacheBones();
+        if (hipBone == null) return;
+
+        Calibrate(pose);
+    }
+
+    public void ResetCalibration()
+    {
+        calibrated = false;
+        autoComputedScale = 1f;
+        pendingPose = null;
+        if (twistSolver != null) twistSolver.Reset();
+    }
+
+    public bool IsCalibrated() => calibrated;
+
+    /// <summary>
+    /// 開/關 limb twist。重置 calibration 讓下一幀重建 TwistSolver。
+    /// </summary>
+    public void SetLimbTwistEnabled(bool enabled)
+    {
+        if (enableLimbTwist == enabled) return;
+        enableLimbTwist = enabled;
+        calibrated = false;
+        if (twistSolver != null) twistSolver.Reset();
+    }
+
+    public bool IsLimbTwistEnabled() => enableLimbTwist;
 
     /// <summary>
     /// 供 Editor 驗證腳本在非 Play 模式下直接套用一幀姿態。

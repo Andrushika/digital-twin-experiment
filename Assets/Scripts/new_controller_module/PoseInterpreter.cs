@@ -65,11 +65,13 @@ public class PoseInterpreter
         public BodyPartFrame R_UpperLeg;    // 右大腿
         public BodyPartFrame R_LowerLeg;    // 右小腿
 
-        // 直接從 keypoints 測量的方向，用於 RetargetSolver 的 pole hint
+        // 直接從 keypoints 測量的方向，用於 RetargetSolver 的 pole hint / TwistSolver 的 reference
         public Vector3 L_FootForward;       // 左腳 heel→foot_index 方向
         public Vector3 R_FootForward;       // 右腳 heel→foot_index 方向
         public Vector3 L_PalmNormal;        // 左手掌法線 cross(wrist→index, wrist→pinky)
         public Vector3 R_PalmNormal;        // 右手掌法線
+        public Vector3 L_FootPlaneNormal;   // 左腳底法線 cross(heel→foot_index, heel→ankle)
+        public Vector3 R_FootPlaneNormal;   // 右腳底法線
 
         public InterpretedPose()
         {
@@ -88,6 +90,8 @@ public class PoseInterpreter
             R_FootForward = Vector3.forward;
             L_PalmNormal = Vector3.up;
             R_PalmNormal = Vector3.up;
+            L_FootPlaneNormal = Vector3.up;
+            R_FootPlaneNormal = Vector3.up;
         }
     }
 
@@ -382,19 +386,30 @@ public class PoseInterpreter
     /// </summary>
     private void ComputeFootForwardVectors(HumanPoseData rawPose)
     {
+        Vector3 l_ankle = rawPose.GetJoint(HumanPoseData.JointType.L_Ankle);
         Vector3 l_heel = rawPose.GetJoint(HumanPoseData.JointType.L_Heel);
         Vector3 l_footIdx = rawPose.GetJoint(HumanPoseData.JointType.L_Foot_Index);
         Vector3 l_fwd = l_footIdx - l_heel;
         interpretedPose.L_FootForward = l_fwd.sqrMagnitude > Epsilon
             ? l_fwd.normalized
             : interpretedPose.Pelvis.Forward;
+        // foot plane normal = cross(heel→foot_index, heel→ankle)，朝向腳背（sole-up）
+        Vector3 l_planeN = Vector3.Cross(l_footIdx - l_heel, l_ankle - l_heel);
+        interpretedPose.L_FootPlaneNormal = l_planeN.sqrMagnitude > Epsilon
+            ? l_planeN.normalized
+            : interpretedPose.Pelvis.Up;
 
+        Vector3 r_ankle = rawPose.GetJoint(HumanPoseData.JointType.R_Ankle);
         Vector3 r_heel = rawPose.GetJoint(HumanPoseData.JointType.R_Heel);
         Vector3 r_footIdx = rawPose.GetJoint(HumanPoseData.JointType.R_Foot_Index);
         Vector3 r_fwd = r_footIdx - r_heel;
         interpretedPose.R_FootForward = r_fwd.sqrMagnitude > Epsilon
             ? r_fwd.normalized
             : interpretedPose.Pelvis.Forward;
+        Vector3 r_planeN = Vector3.Cross(r_footIdx - r_heel, r_ankle - r_heel);
+        interpretedPose.R_FootPlaneNormal = r_planeN.sqrMagnitude > Epsilon
+            ? r_planeN.normalized
+            : interpretedPose.Pelvis.Up;
     }
 
     /// <summary>

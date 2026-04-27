@@ -20,8 +20,13 @@ public class QuickStart : MonoBehaviour
     [SerializeField] private bool playOnStart = true;
     [SerializeField] private MotionController.Phase targetPhase = MotionController.Phase.Phase4_RotationDriven;
     [SerializeField] private float playbackSpeed = 1f;
-    
+
+    [Header("Limb Twist")]
+    [Tooltip("開啟才會用 PalmNormal/FootPlaneNormal 反推 forearm/shin/upper-arm/thigh 的 twist。Body-pose 資料噪音大，預期 forearm 多數時間 hold。")]
+    [SerializeField] private bool enableLimbTwist = false;
+
     private MotionController motionController;
+    private RetargetSolver retargetSolver;
     private Vector2 scrollPosition;
     private GUIStyle titleStyle;
 
@@ -70,12 +75,30 @@ public class QuickStart : MonoBehaviour
             Debug.Log("[QuickStart] DataReceiver created");
         }
 
+        // 取得 RetargetSolver（MotionController 會自動建立，這裡 cache 起來方便傳 toggle）
+        retargetSolver = GetComponent<RetargetSolver>();
+        if (retargetSolver == null)
+        {
+            retargetSolver = gameObject.AddComponent<RetargetSolver>();
+            Debug.Log("[QuickStart] RetargetSolver created");
+        }
+        retargetSolver.SetLimbTwistEnabled(enableLimbTwist);
+
         // 設定 CSV 檔路徑
         // CSV 應該放在 Assets/Motion Data/keypoints_data/ 資料夾下
         string csvPath = "Motion Data/keypoints_data/" + csvFileName;
         dataReceiver.ConfigureFileInput(csvPath, playbackSpeed);
 
-        Debug.Log($"[QuickStart] Setup complete. CSV path: {csvPath}");
+        Debug.Log($"[QuickStart] Setup complete. CSV path: {csvPath}, limbTwist={enableLimbTwist}");
+    }
+
+    /// <summary>
+    /// Play 中改 Inspector 的 enableLimbTwist 會即時套用（會觸發重新 calibrate）。
+    /// </summary>
+    private void OnValidate()
+    {
+        if (Application.isPlaying && retargetSolver != null)
+            retargetSolver.SetLimbTwistEnabled(enableLimbTwist);
     }
 
     /// <summary>

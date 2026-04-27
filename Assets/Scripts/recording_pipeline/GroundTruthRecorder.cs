@@ -39,6 +39,13 @@ public class GroundTruthRecorder : MonoBehaviour
     [Tooltip("採樣頻率（Hz）。30 fps 與 pose_data.csv 預設一致。")]
     [SerializeField] private float fps = 30f;
 
+    [Tooltip("動畫播放速度倍率（只影響 BakeFromClip）：\n" +
+             "  1.0 = 原速\n" +
+             "  0.5 = 慢動作（CSV 取樣更密 → DataReceiver 播放時看起來慢 2x）\n" +
+             "  2.0 = 快轉（CSV 取樣更疏 → DataReceiver 播放時看起來快 2x）")]
+    [Range(0.1f, 5f)]
+    [SerializeField] private float speed = 1f;
+
     [Header("Output")]
     [Tooltip("CSV 輸出路徑。可填絕對路徑、Assets 內相對路徑、或專案根相對路徑。")]
     [SerializeField] private string outputPath = "Assets/Scripts/new_controller_module/ground_truth.csv";
@@ -56,6 +63,8 @@ public class GroundTruthRecorder : MonoBehaviour
     private bool _isLiveRecording = false;
     private float _liveAccumulator = 0f;
 
+    public Animator TargetAnimator => targetAnimator;
+
     // 臉部 / 額外點 用 head transform 估算的本地偏移（公尺）
     private const float HeadToNoseForward = 0.10f;
     private const float HeadToNoseDown = -0.04f;
@@ -70,8 +79,10 @@ public class GroundTruthRecorder : MonoBehaviour
     private const float MouthSide = 0.02f;
 
     private const float HeelBackOffset = 0.06f;
+    private const float HeelDownOffset = 0.07f;     // heel 在 ankle 下方多少 — 必須 > 0 否則 foot plane 退化
     private const float ToeForwardOffset = 0.12f;
-    private const float HandFingerExtend = 0.08f;
+    private const float HandMcpForwardOffset = 0.08f;
+    private const float HandMcpSideOffset = 0.025f;
 
     private void Start()
     {
@@ -109,12 +120,12 @@ public class GroundTruthRecorder : MonoBehaviour
             Debug.LogError("[GroundTruthRecorder] mode must be BakeFromClip to use this menu");
             return;
         }
-        if (targetAnimator == null || clip == null)
+        if (clip == null)
         {
-            Debug.LogError("[GroundTruthRecorder] targetAnimator and clip are required for BakeFromClip");
+            Debug.LogError("[GroundTruthRecorder] clip is required for BakeFromClip");
             return;
         }
-        if (targetAnimator.avatar == null || !targetAnimator.avatar.isHuman)
+        if (!TryResolveTargetAnimator(out Animator animator))
         {
             Debug.LogError("[GroundTruthRecorder] targetAnimator must use a Humanoid Avatar");
             return;
@@ -122,25 +133,29 @@ public class GroundTruthRecorder : MonoBehaviour
 
         _frames.Clear();
         float duration = clip.length;
-        float dt = 1f / Mathf.Max(1f, fps);
-        int total = Mathf.Max(1, Mathf.CeilToInt(duration / dt) + 1);
+        float spd = Mathf.Max(0.01f, speed);
+        // clipDt = 每個 output frame 對應多少 clip 時間
+        // speed=0.5 → clipDt 變一半 → 同樣 fps 下取樣更密 → CSV 變長 → 播放慢動作
+        float clipDt = spd / Mathf.Max(1f, fps);
+        int total = Mathf.Max(1, Mathf.CeilToInt(duration / clipDt) + 1);
 
         for (int i = 0; i < total; i++)
         {
-            float t = Mathf.Min(i * dt, duration);
-            clip.SampleAnimation(targetAnimator.gameObject, t);
+            float t = Mathf.Min(i * clipDt, duration);
+            clip.SampleAnimation(animator.gameObject, t);
             _frames.Add(SampleCurrentPose());
         }
 
         WriteCSV();
-        Debug.Log($"[GroundTruthRecorder] Baked {_frames.Count} frames @ {fps}fps " +
-                  $"(clip length {duration:F3}s) → {ResolveOutputPath()}");
+        float playbackSec = _frames.Count / Mathf.Max(1f, fps);
+        Debug.Log($"[GroundTruthRecorder] Baked {_frames.Count} frames @ {fps}fps × speed {spd:F2} " +
+                  $"(clip {duration:F3}s → CSV plays back {playbackSec:F3}s) → {ResolveOutputPath()}");
     }
 
     [ContextMenu("Begin Live Recording")]
     public void BeginLiveRecording()
     {
-        if (targetAnimator == null || targetAnimator.avatar == null || !targetAnimator.avatar.isHuman)
+        if (!TryResolveTargetAnimator(out _))
         {
             Debug.LogError("[GroundTruthRecorder] targetAnimator with Humanoid Avatar required");
             return;
@@ -165,28 +180,29 @@ public class GroundTruthRecorder : MonoBehaviour
     }
 
     /// <summary>
-    /// 從目前 avatar 的 bone.position 抽出 33 個 keypoints。
-    /// 回傳 99 個 float (x,y,z * 33)，已套用 useMediaPipeConvention（如啟用）。
+    /// 從目前 avatar 的 bone.position 抽出 33 個 keypoints (Unity 世界座標，無 convention 翻轉)。
+    /// 公開給 TwistDiagnostic 等工具直接用。
     /// </summary>
-    private float[] SampleCurrentPose()
+    public Vector3[] SampleJointPositionsWorld()
     {
         Vector3[] j = new Vector3[33];
+        if (!TryResolveTargetAnimator(out Animator animator)) return j;
 
-        Transform head = targetAnimator.GetBoneTransform(HumanBodyBones.Head);
-        Transform leftShoulder = targetAnimator.GetBoneTransform(HumanBodyBones.LeftUpperArm);
-        Transform rightShoulder = targetAnimator.GetBoneTransform(HumanBodyBones.RightUpperArm);
-        Transform leftElbow = targetAnimator.GetBoneTransform(HumanBodyBones.LeftLowerArm);
-        Transform rightElbow = targetAnimator.GetBoneTransform(HumanBodyBones.RightLowerArm);
-        Transform leftHand = targetAnimator.GetBoneTransform(HumanBodyBones.LeftHand);
-        Transform rightHand = targetAnimator.GetBoneTransform(HumanBodyBones.RightHand);
-        Transform leftHip = targetAnimator.GetBoneTransform(HumanBodyBones.LeftUpperLeg);
-        Transform rightHip = targetAnimator.GetBoneTransform(HumanBodyBones.RightUpperLeg);
-        Transform leftKnee = targetAnimator.GetBoneTransform(HumanBodyBones.LeftLowerLeg);
-        Transform rightKnee = targetAnimator.GetBoneTransform(HumanBodyBones.RightLowerLeg);
-        Transform leftFoot = targetAnimator.GetBoneTransform(HumanBodyBones.LeftFoot);
-        Transform rightFoot = targetAnimator.GetBoneTransform(HumanBodyBones.RightFoot);
-        Transform leftToes = targetAnimator.GetBoneTransform(HumanBodyBones.LeftToes);
-        Transform rightToes = targetAnimator.GetBoneTransform(HumanBodyBones.RightToes);
+        Transform head = animator.GetBoneTransform(HumanBodyBones.Head);
+        Transform leftShoulder = animator.GetBoneTransform(HumanBodyBones.LeftUpperArm);
+        Transform rightShoulder = animator.GetBoneTransform(HumanBodyBones.RightUpperArm);
+        Transform leftElbow = animator.GetBoneTransform(HumanBodyBones.LeftLowerArm);
+        Transform rightElbow = animator.GetBoneTransform(HumanBodyBones.RightLowerArm);
+        Transform leftHand = animator.GetBoneTransform(HumanBodyBones.LeftHand);
+        Transform rightHand = animator.GetBoneTransform(HumanBodyBones.RightHand);
+        Transform leftHip = animator.GetBoneTransform(HumanBodyBones.LeftUpperLeg);
+        Transform rightHip = animator.GetBoneTransform(HumanBodyBones.RightUpperLeg);
+        Transform leftKnee = animator.GetBoneTransform(HumanBodyBones.LeftLowerLeg);
+        Transform rightKnee = animator.GetBoneTransform(HumanBodyBones.RightLowerLeg);
+        Transform leftFoot = animator.GetBoneTransform(HumanBodyBones.LeftFoot);
+        Transform rightFoot = animator.GetBoneTransform(HumanBodyBones.RightFoot);
+        Transform leftToes = animator.GetBoneTransform(HumanBodyBones.LeftToes);
+        Transform rightToes = animator.GetBoneTransform(HumanBodyBones.RightToes);
 
         // 主要關節：直接取 bone.position
         SetIfPresent(j, HumanPoseData.JointType.L_Shoulder, leftShoulder);
@@ -212,14 +228,14 @@ public class GroundTruthRecorder : MonoBehaviour
         j[(int)HumanPoseData.JointType.L_Foot_Index] = lFootIdx;
         j[(int)HumanPoseData.JointType.R_Foot_Index] = rFootIdx;
 
-        // 手指：pinky / index 指尖（優先用 finger bone，不存在就用 hand 估算）
-        EstimateFingerTip(leftHand, HumanBodyBones.LeftIndexDistal, HumanBodyBones.LeftIndexProximal,
+        // 手部：pinky / index MCP（指根）。MediaPipe Pose 的手部點在這條 pipeline 以 MCP 語意使用。
+        EstimateMcpKeypoint(animator, leftHand, HumanBodyBones.LeftIndexProximal,
             isLeft: true, isIndex: true, out Vector3 lIndex);
-        EstimateFingerTip(leftHand, HumanBodyBones.LeftLittleDistal, HumanBodyBones.LeftLittleProximal,
+        EstimateMcpKeypoint(animator, leftHand, HumanBodyBones.LeftLittleProximal,
             isLeft: true, isIndex: false, out Vector3 lPinky);
-        EstimateFingerTip(rightHand, HumanBodyBones.RightIndexDistal, HumanBodyBones.RightIndexProximal,
+        EstimateMcpKeypoint(animator, rightHand, HumanBodyBones.RightIndexProximal,
             isLeft: false, isIndex: true, out Vector3 rIndex);
-        EstimateFingerTip(rightHand, HumanBodyBones.RightLittleDistal, HumanBodyBones.RightLittleProximal,
+        EstimateMcpKeypoint(animator, rightHand, HumanBodyBones.RightLittleProximal,
             isLeft: false, isIndex: false, out Vector3 rPinky);
         j[(int)HumanPoseData.JointType.L_Index] = lIndex;
         j[(int)HumanPoseData.JointType.L_Pinky] = lPinky;
@@ -227,9 +243,34 @@ public class GroundTruthRecorder : MonoBehaviour
         j[(int)HumanPoseData.JointType.R_Pinky] = rPinky;
 
         // 臉部：head 沒有 nose/eye/ear/mouth 的 humanoid 對應，從 head transform 估算
-        EstimateFaceKeypoints(head, j);
+        EstimateFaceKeypoints(animator, head, j);
 
-        // 套用座標慣例 + 攤平成 float[]
+        return j;
+    }
+
+    public bool TryResolveTargetAnimator(out Animator animator)
+    {
+        animator = targetAnimator;
+        if (animator == null) animator = GetComponent<Animator>();
+        if (animator == null) animator = GetComponentInParent<Animator>();
+
+        if (animator == null || animator.avatar == null || !animator.avatar.isHuman)
+        {
+            animator = null;
+            return false;
+        }
+
+        if (targetAnimator == null)
+            targetAnimator = animator;
+        return true;
+    }
+
+    /// <summary>
+    /// 內部 CSV 採樣：呼叫 SampleJointPositionsWorld 後套用 useMediaPipeConvention，攤平成 float[]。
+    /// </summary>
+    private float[] SampleCurrentPose()
+    {
+        Vector3[] j = SampleJointPositionsWorld();
         float[] data = new float[99];
         for (int i = 0; i < 33; i++)
         {
@@ -251,7 +292,7 @@ public class GroundTruthRecorder : MonoBehaviour
 
     /// <summary>
     /// foot bone ≈ ankle；toes bone ≈ 腳掌中段。
-    /// heel = foot.position - footForward * HeelBackOffset
+    /// heel = foot.position - footForward * HeelBackOffset - foot.up * HeelDownOffset
     /// foot_index = toes.position（若無 toes，用 foot.forward 推算）
     /// </summary>
     private void EstimateFootKeypoints(Transform foot, Transform toes,
@@ -277,56 +318,47 @@ public class GroundTruthRecorder : MonoBehaviour
             footIndex = foot.position + footForward * ToeForwardOffset;
         }
 
-        heel = foot.position - footForward * HeelBackOffset;
+        heel = foot.position - footForward * HeelBackOffset - foot.up * HeelDownOffset;
     }
 
     /// <summary>
-    /// 手指尖端：優先取 distal bone，再退到 proximal bone，
-    /// 都沒有就用 hand transform + 預估方向。
+    /// MCP / 指根位置：優先取 proximal bone root；沒有 finger bone 時用 hand transform 估算。
     /// </summary>
-    private void EstimateFingerTip(Transform hand, HumanBodyBones distalBone, HumanBodyBones proximalBone,
-        bool isLeft, bool isIndex, out Vector3 tip)
+    private void EstimateMcpKeypoint(Animator animator, Transform hand, HumanBodyBones proximalBone,
+        bool isLeft, bool isIndex, out Vector3 mcp)
     {
-        Transform distal = targetAnimator.GetBoneTransform(distalBone);
-        if (distal != null)
-        {
-            // distal bone 的位置是手指最遠關節 root，再沿手指長度推一小段到指尖
-            tip = distal.position + distal.forward * 0.025f;
-            return;
-        }
-
-        Transform proximal = targetAnimator.GetBoneTransform(proximalBone);
+        Transform proximal = animator.GetBoneTransform(proximalBone);
         if (proximal != null)
         {
-            tip = proximal.position + proximal.forward * 0.06f;
+            mcp = proximal.position;
             return;
         }
 
         if (hand == null)
         {
-            tip = Vector3.zero;
+            mcp = Vector3.zero;
             return;
         }
 
-        // 沒有任何手指骨骼：以 hand bone 為基準推估
+        // 沒有 finger bones：以 hand bone 為基準推估 MCP / knuckle 位置。
         // Unity Humanoid 慣例：手部 X 軸沿手臂延伸（左手=-X 右手=+X 朝外）
         Vector3 fingerDir = isLeft ? -hand.right : hand.right;
         Vector3 sideways = hand.up; // pinky/index 在 hand 平面上的橫向偏移
-        float side = isIndex ? 0.025f : -0.025f;
+        float side = isIndex ? HandMcpSideOffset : -HandMcpSideOffset;
         if (!isLeft) side = -side; // 右手對稱
-        tip = hand.position + fingerDir * HandFingerExtend + sideways * side;
+        mcp = hand.position + fingerDir * HandMcpForwardOffset + sideways * side;
     }
 
     /// <summary>
     /// 從 head bone 估算 nose/eye/ear/mouth — Humanoid avatar 通常沒有這些骨骼。
     /// 偏移使用 head transform 的本地座標軸 (forward / up / right)。
     /// </summary>
-    private void EstimateFaceKeypoints(Transform head, Vector3[] j)
+    private void EstimateFaceKeypoints(Animator animator, Transform head, Vector3[] j)
     {
         if (head == null)
         {
             // 退而求其次：讓所有臉部點等於頸部頂端，至少不會 NaN
-            Transform neck = targetAnimator.GetBoneTransform(HumanBodyBones.Neck);
+            Transform neck = animator.GetBoneTransform(HumanBodyBones.Neck);
             Vector3 fallback = neck != null ? neck.position : Vector3.zero;
             for (int i = (int)HumanPoseData.JointType.Nose; i <= (int)HumanPoseData.JointType.Mouth_Right; i++)
                 j[i] = fallback;
@@ -338,8 +370,8 @@ public class GroundTruthRecorder : MonoBehaviour
         Vector3 right = head.right;
 
         // 嘗試使用真正的眼睛骨骼（如果 avatar 有設定）
-        Transform leftEyeBone = targetAnimator.GetBoneTransform(HumanBodyBones.LeftEye);
-        Transform rightEyeBone = targetAnimator.GetBoneTransform(HumanBodyBones.RightEye);
+        Transform leftEyeBone = animator.GetBoneTransform(HumanBodyBones.LeftEye);
+        Transform rightEyeBone = animator.GetBoneTransform(HumanBodyBones.RightEye);
         Vector3 lEyeCenter = leftEyeBone != null
             ? leftEyeBone.position
             : head.position + fwd * EyeForward + up * EyeUp - right * EyeOuterSide * 0.5f;

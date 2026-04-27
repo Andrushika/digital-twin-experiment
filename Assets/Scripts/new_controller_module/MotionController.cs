@@ -199,6 +199,35 @@ public class MotionController : MonoBehaviour
         dataReceiver.ReceiveFrame(pose);
     }
 
+    public void CalibrateFromPoseData(HumanPoseData pose)
+    {
+        if (pose == null || !pose.IsValid)
+        {
+            Debug.LogWarning("[MotionController] Cannot calibrate: invalid pose");
+            return;
+        }
+
+        PoseInterpreter.InterpretedPose interpreted = poseInterpreter.Interpret(pose);
+        retargetSolver.CalibrateFromPose(interpreted);
+    }
+
+    public void CalibrateFromCurrentFrame()
+    {
+        HumanPoseData latestFrame = dataReceiver.GetLatestFrame();
+        if (latestFrame == null)
+        {
+            Debug.LogWarning("[MotionController] Cannot calibrate: no frame received yet");
+            return;
+        }
+
+        CalibrateFromPoseData(latestFrame);
+    }
+
+    public void ResetRetargetCalibration()
+    {
+        retargetSolver.ResetCalibration();
+    }
+
     /// <summary>
     /// 啟動指定 Phase
     /// </summary>
